@@ -35,6 +35,38 @@ DEMO_PRODUCTS = (
 )
 DEMO_EXISTING_STOCK = {"CURREN M3471": 8, "WALTON 398": 0, "HONOR 200": 5}
 
+PRODUCT_CATEGORIES = (
+    ("Fridge", "ফ্রিজ", r"\bfridges?\b|refrigerator|ফ্রিজ", ("WALTON 398", "Walton WFC")),
+    ("Mobile", "মোবাইল", r"\b(?:mobiles?|phones?)\b|মোবাইল|ফোন", ("HONOR", "Xiaomi")),
+    ("Watch", "ঘড়ি", r"\bwatches\b|\bwatch\b|ঘড়ি|ঘড়ি", ("CURREN",)),
+    ("TV", "টিভি", r"\btvs?\b|television|টিভি", ("Samsung", "Walton Prisma")),
+)
+
+
+def catalog_availability(question, catalog, stock, bangla):
+    asks_stock = re.search(r"stock|availab|\bhave\b|\bwhat\b|\bhow many\b|কত|স্টক|আছে|পাওয়া|কি কি|কী কী", question)
+    asks_catalog = re.search(r"products?|catalog|পণ্য|ক্যাটালগ|কি কি|কী কী", question)
+    categories = [category for category in PRODUCT_CATEGORIES if re.search(category[2], question)]
+    if not (asks_stock and (asks_catalog or categories)):
+        return None
+    if re.search(r"m3471|\b398\b|honor\s*200|redmi\s*note|u8000f|w43g5m|3d8", question):
+        return None
+
+    lines = []
+    for english, bengali, _, prefixes in categories or PRODUCT_CATEGORIES:
+        models = [name for name in catalog if name.startswith(prefixes)]
+        available = [f"{name} ({stock[name]})" for name in models if stock.get(name, 0) > 0]
+        unknown = any(name not in stock for name in models)
+        label = bengali if bangla else english
+        details = ", ".join(available)
+        if unknown:
+            check = "স্টক যাচাই করতে হবে" if bangla else "stock needs checking"
+            details = f"{details}; {check}" if details else check
+        if not details:
+            details = "স্টকে নেই" if bangla else "out of stock"
+        lines.append(f"{label}: {details}")
+    return "\n".join(lines)
+
 
 def init_orders(db):
     db.execute("CREATE TABLE IF NOT EXISTS drafts(sender TEXT PRIMARY KEY, model TEXT NOT NULL, quantity INTEGER)")
@@ -56,6 +88,9 @@ def order_reply(db, sender, text, stock, demo=False):
         ) + PRODUCTS
         stock = DEMO_EXISTING_STOCK | {name: count for name, _, count in DEMO_PRODUCTS} | stock
     catalog = {p[0]: p for p in products}
+    availability = catalog_availability(clean, catalog, stock, bangla)
+    if availability:
+        return availability
     draft = db.execute("SELECT model, quantity FROM drafts WHERE sender=?", (sender,)).fetchone()
     contact = db.execute("SELECT name FROM pending_contact WHERE sender=?", (sender,)).fetchone()
     last = db.execute("SELECT model FROM chat_context WHERE sender=?", (sender,)).fetchone()
@@ -75,6 +110,15 @@ def order_reply(db, sender, text, stock, demo=False):
         return "অর্ডার বাতিল হয়েছে।" if bangla else "Order cancelled."
 
     if contact and draft:
+        if re.search(r"\b(?:available|stock)\b|আছে|স্টক|পাওয়া", clean):
+            selected = next((p for p in products if re.search(p[4], clean)), None)
+            if selected:
+                if unavailable(selected[0]):
+                    return "এখন স্টকে নেই।" if bangla else "Currently out of stock."
+                if selected[0] in stock:
+                    count = stock[selected[0]]
+                    return f"স্টকে {count}টি আছে।" if bangla else f"{count} in stock."
+                return "স্টক দোকান যাচাই করবে।" if bangla else "The shop will check stock."
         model, quantity = draft
         if unavailable(model, quantity):
             clear_order()
