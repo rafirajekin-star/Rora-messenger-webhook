@@ -1,4 +1,4 @@
-"""ROZA Electronics Messenger callback and catalog replies."""
+"""RORA Electronics Messenger callback and catalog replies."""
 
 import hmac
 import json
@@ -129,9 +129,9 @@ def reply(text, products=PRODUCTS):
     if re.search(r"discount|ছাড়|ছাড়", text, re.I):
         return "স্টক ক্লিয়ারেন্সে সব পণ্যে ১০% ছাড়।" if bangla else "Our stock clearance offers 10% off all products."
     return (
-        "ROZA ELECTRONICS-এ স্বাগতম। দাম জানতে CURREN M3471, WALTON 398 বা HONOR 200 লিখুন। অন্য প্রশ্নে দোকানের কর্মী সাহায্য করতে পারবেন।"
+        "RORA ELECTRONICS-এ স্বাগতম। দাম জানতে CURREN M3471, WALTON 398 বা HONOR 200 লিখুন। অন্য প্রশ্নে দোকানের কর্মী সাহায্য করতে পারবেন।"
         if bangla else
-        "Welcome to ROZA ELECTRONICS. For prices, type CURREN M3471, WALTON 398 or HONOR 200. Our shop team can help with other questions."
+        "Welcome to RORA ELECTRONICS. For prices, type CURREN M3471, WALTON 398 or HONOR 200. Our shop team can help with other questions."
     )
 
 
@@ -256,9 +256,9 @@ def main():
         server.app_secret = os.environ.get("META_APP_SECRET", "").strip().encode()
         server.page_token = os.environ.get("META_PAGE_ACCESS_TOKEN", "").strip()
         server.graph_version = os.environ.get("META_GRAPH_VERSION", "").strip()
-        server.stock = json.loads(os.environ.get("ROZA_STOCK_JSON", "{}"))
-        server.demo = os.environ.get("ROZA_DEMO_MODE") == "1"
-        server.order_db = "roza-demo.sqlite3" if server.demo else os.environ.get("ROZA_ORDER_DB", "roza-orders.sqlite3")
+        server.stock = json.loads(os.environ.get("RORA_STOCK_JSON", os.environ.get("ROZA_STOCK_JSON", "{}")))
+        server.demo = os.environ.get("RORA_DEMO_MODE", os.environ.get("ROZA_DEMO_MODE")) == "1"
+        server.order_db = "roza-demo.sqlite3" if server.demo else os.environ.get("RORA_ORDER_DB", os.environ.get("ROZA_ORDER_DB", "roza-orders.sqlite3"))
         with sqlite3.connect(server.order_db) as db:
             db.execute("CREATE TABLE IF NOT EXISTS drafts(sender TEXT PRIMARY KEY, model TEXT NOT NULL, quantity INTEGER)")
             db.execute("CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY, sender TEXT NOT NULL, model TEXT NOT NULL, quantity INTEGER NOT NULL)")
