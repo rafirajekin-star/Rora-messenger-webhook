@@ -36,88 +36,135 @@ DEMO_PRODUCTS = (
 DEMO_EXISTING_STOCK = {"CURREN M3471": 8, "WALTON 398": 0, "HONOR 200": 5}
 
 
+def init_orders(db):
+    db.execute("CREATE TABLE IF NOT EXISTS drafts(sender TEXT PRIMARY KEY, model TEXT NOT NULL, quantity INTEGER)")
+    db.execute("CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY, sender TEXT NOT NULL, model TEXT NOT NULL, quantity INTEGER NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS chat_context(sender TEXT PRIMARY KEY, model TEXT NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS pending_contact(sender TEXT PRIMARY KEY, name TEXT)")
+    db.execute("CREATE TABLE IF NOT EXISTS order_contacts(order_id INTEGER PRIMARY KEY, name TEXT NOT NULL, address TEXT NOT NULL)")
+
+
 def order_reply(db, sender, text, stock, demo=False):
+    text = text.strip()
     bangla = bool(re.search(r"[\u0980-\u09ff]", text))
-    clean = text.strip().lower().translate(BANGLA_DIGITS)
-    demo_products = tuple(
-        (name, price, "1 year", "১ বছর", pattern)
-        for (name, price, _), (_, pattern) in zip(DEMO_PRODUCTS, CATALOG_CANDIDATES, strict=True)
-    ) if demo else ()
-    products = PRODUCTS + demo_products
+    clean = text.lower().translate(BANGLA_DIGITS).strip(" ?!।")
+    products = PRODUCTS
     if demo:
+        products = tuple(
+            (name, price, "1 year", "১ বছর", pattern)
+            for (name, price, _), (_, pattern) in zip(DEMO_PRODUCTS, CATALOG_CANDIDATES, strict=True)
+        ) + PRODUCTS
         stock = DEMO_EXISTING_STOCK | {name: count for name, _, count in DEMO_PRODUCTS} | stock
+    catalog = {p[0]: p for p in products}
     draft = db.execute("SELECT model, quantity FROM drafts WHERE sender=?", (sender,)).fetchone()
-    if clean in {"cancel", "বাতিল"}:
+    contact = db.execute("SELECT name FROM pending_contact WHERE sender=?", (sender,)).fetchone()
+    last = db.execute("SELECT model FROM chat_context WHERE sender=?", (sender,)).fetchone()
+
+    def clear_order():
         db.execute("DELETE FROM drafts WHERE sender=?", (sender,))
-        return "অর্ডারের খসড়া বাতিল হয়েছে।" if bangla else "Your order draft was cancelled."
-    for name, pattern in CATALOG_CANDIDATES:
-        if not demo and re.search(pattern, clean):
-            if bangla:
-                return f"{name}: দোকানের দাম ও স্টক এখনও যাচাই করা হয়নি। দোকানের কর্মী জানাবেন।"
-            return f"{name}: our shop price and stock are awaiting verification. Please check with the shop team."
-    product = next((p for p in demo_products if re.search(p[4], clean, re.I)), None)
-    if not product:
-        product = next((p for p in PRODUCTS if re.search(p[4], clean, re.I)), None)
-    if draft and draft[0] and re.fullmatch(r"[0-9]{1,3}", clean):
-        product = None
-    if product and stock.get(product[0]) == 0:
-        if draft and draft[0] == product[0]:
-            db.execute("DELETE FROM drafts WHERE sender=?", (sender,))
-        return f"{product[0]} এখন স্টকে নেই।" if bangla else f"{product[0]} is currently out of stock."
-    if clean in {"confirm", "নিশ্চিত", "কনফার্ম"}:
-        if not draft or not draft[1]:
-            return "আগে মডেল ও পরিমাণ দিন।" if bangla else "Please give the model and quantity first."
+        db.execute("DELETE FROM pending_contact WHERE sender=?", (sender,))
+
+    def unavailable(model, quantity=1):
+        return model in stock and stock[model] < quantity
+
+    def stock_message():
+        return "চাওয়া পরিমাণ স্টকে নেই।" if bangla else "That quantity is out of stock."
+
+    if clean in {"cancel", "বাতিল"}:
+        clear_order()
+        return "অর্ডার বাতিল হয়েছে।" if bangla else "Order cancelled."
+
+    if contact and draft:
         model, quantity = draft
-        if model in stock and quantity > stock[model]:
-            db.execute("DELETE FROM drafts WHERE sender=?", (sender,))
-            return "চাওয়া পরিমাণ স্টকে নেই।" if bangla else "The requested quantity is unavailable."
+        if unavailable(model, quantity):
+            clear_order()
+            return stock_message()
+        if contact[0] is None:
+            if not 2 <= len(text) <= 100 or not any(c.isalpha() for c in text):
+                return "আপনার নাম লিখুন।" if bangla else "Please enter your name."
+            db.execute("UPDATE pending_contact SET name=? WHERE sender=?", (text, sender))
+            return "ডেলিভারির ঠিকানা লিখুন।" if bangla else "Please enter your delivery address."
+        if not 5 <= len(text) <= 500 or clean in {"confirm", "নিশ্চিত", "কনফার্ম"}:
+            return "সম্পূর্ণ ডেলিভারির ঠিকানা লিখুন।" if bangla else "Please enter the full delivery address."
         if demo:
-            db.execute("DELETE FROM drafts WHERE sender=?", (sender,))
-            return "নমুনা অর্ডার নিশ্চিত হয়েছে।" if bangla else "Demo order confirmed."
+            clear_order()
+            return "পরীক্ষার অর্ডার সম্পন্ন।" if bangla else "Test order completed."
         order_id = db.execute(
             "INSERT INTO orders(sender, model, quantity) VALUES(?,?,?)", (sender, model, quantity)
         ).lastrowid
-        db.execute("DELETE FROM drafts WHERE sender=?", (sender,))
+        db.execute("INSERT INTO order_contacts VALUES(?,?,?)", (order_id, contact[0], text))
+        clear_order()
+        return f"অর্ডার অনুরোধ #{order_id} জমা হয়েছে।" if bangla else f"Order request #{order_id} received."
+
+    if clean in {"confirm", "নিশ্চিত", "কনফার্ম", "confirm order", "অর্ডার নিশ্চিত"}:
+        if not draft or not draft[1] or draft[0] not in catalog:
+            return "আগে মডেল ও পরিমাণ লিখুন।" if bangla else "Please enter the model and quantity first."
+        if unavailable(draft[0], draft[1]):
+            clear_order()
+            return stock_message()
+        db.execute("INSERT OR REPLACE INTO pending_contact VALUES(?,NULL)", (sender,))
+        total = catalog[draft[0]][1] * draft[1] + 60
         if bangla:
-            return f"অর্ডার অনুরোধ #{order_id} নিশ্চিত হয়েছে। দোকান স্টক ও ডেলিভারি যাচাই করে এই চ্যাটে জানাবে।"
-        return f"Order request #{order_id} confirmed. The shop will verify stock and delivery in this chat."
-    if re.search(r"\border\b|\bbuy\b|অর্ডার|কিনতে", clean, re.I) or (draft and product):
-        db.execute("INSERT OR REPLACE INTO drafts VALUES(?,?,NULL)", (sender, product[0] if product else ""))
-        if not product:
-            return "পণ্যের মডেল লিখুন।" if bangla else "Please enter the product model."
-        return f"{product[0]} কয়টি লাগবে? শুধু সংখ্যা লিখুন।" if bangla else f"How many {product[0]} units? Enter a number."
+            return f"ডেলিভারি ৳৬০। মোট ৳{total:,}। আপনার নাম লিখুন।"
+        return f"Delivery ৳60. Total ৳{total:,}. Please enter your name."
+
     if draft and draft[0] and re.fullmatch(r"[0-9]{1,3}", clean):
         quantity = int(clean)
-        model = draft[0]
-        if quantity < 1 or (model in stock and quantity > stock[model]):
-            return "এই পরিমাণ নেওয়া যাচ্ছে না। অন্য সংখ্যা দিন।" if bangla else "That quantity is unavailable. Enter another quantity."
-        sale_price = next((p[1] for p in products if p[0] == model), None)
-        if sale_price is None:
-            db.execute("DELETE FROM drafts WHERE sender=?", (sender,))
-            return "মডেলটি আবার লিখুন।" if bangla else "Please enter the model again."
-        original = sale_price * 10 // 9
+        if not quantity:
+            return "১ বা তার বেশি লিখুন।" if bangla else "Enter a quantity of at least 1."
+        if unavailable(draft[0], quantity):
+            return stock_message()
         db.execute("UPDATE drafts SET quantity=? WHERE sender=?", (quantity, sender))
-        discount = (original - sale_price) * quantity
-        total = sale_price * quantity + 60
-        if bangla:
-            return f"{model} × {quantity}\n১০% ছাড়: ৳{discount:,}\nডেলিভারি: ৳60\nমোট: ৳{total:,}\nঅনুরোধ নিশ্চিত করতে CONFIRM লিখুন। দোকান স্টক যাচাই করবে।"
-        return f"{model} × {quantity}\n10% discount: ৳{discount:,}\nDelivery: ৳60\nTotal: ৳{total:,}\nType CONFIRM to submit the request. The shop will check stock."
-    return reply(text, products=demo_products + PRODUCTS)
+        return "অর্ডার নিশ্চিত করতে CONFIRM লিখুন।" if bangla else "Type CONFIRM to confirm your order."
+
+    if not demo:
+        for _, pattern in CATALOG_CANDIDATES:
+            if re.search(pattern, clean):
+                return "দাম ও স্টক দোকান জানাবে।" if bangla else "Please check with the shop for price and stock."
+
+    product = next((p for p in products if re.search(p[4], clean)), None)
+    previous = catalog.get(draft[0] if draft and draft[0] else last[0] if last else "")
+    if product:
+        db.execute("INSERT OR REPLACE INTO chat_context VALUES(?,?)", (sender, product[0]))
+    if re.search(r"discount|offer|ছাড়|ছাড়|অফার", clean):
+        selected = product or previous
+        if not selected:
+            return "সব পণ্যে ১০% ছাড়। কোন মডেল?" if bangla else "10% off all products. Which model?"
+        sale = selected[1]
+        original = sale * 10 // 9
+        return f"১০% ছাড়ে ৳{original:,} → ৳{sale:,}।" if bangla else f"10% off: ৳{original:,} → ৳{sale:,}."
+    if product and re.search(r"price|cost|দাম|মূল্য", clean):
+        return f"৳{product[1] * 10 // 9:,}"
+    ordering = re.search(r"\border\b|\bbuy\b|অর্ডার|কিনতে", clean)
+    if ordering or (draft and not draft[0] and product):
+        selected = product or previous
+        if selected and unavailable(selected[0]):
+            return stock_message()
+        db.execute("INSERT OR REPLACE INTO drafts VALUES(?,?,NULL)", (sender, selected[0] if selected else ""))
+        if not selected:
+            return "মডেল লিখুন।" if bangla else "Which model?"
+        return "কয়টি লাগবে?" if bangla else "How many units?"
+    if re.search(r"stock|available|আছে|স্টক|পাওয়া", clean):
+        selected = product or previous
+        if not selected:
+            return "কোন মডেল?" if bangla else "Which model?"
+        if unavailable(selected[0]):
+            return "এখন স্টকে নেই।" if bangla else "Currently out of stock."
+        if selected[0] in stock:
+            return "স্টকে আছে।" if bangla else "In stock."
+        return "স্টক দোকান যাচাই করবে।" if bangla else "The shop will check stock."
+    if product and re.search(r"warranty|ওয়ারেন্টি|ওয়ারেন্টি", clean):
+        return product[3] if bangla else product[2]
+    if product or re.search(r"price|cost|দাম|মূল্য", clean):
+        selected = product or previous
+        if selected:
+            return f"৳{selected[1] * 10 // 9:,}"
+        return "কোন মডেল?" if bangla else "Which model?"
+    return reply(text)
 
 
-def reply(text, products=PRODUCTS):
+def reply(text):
     bangla = bool(re.search(r"[\u0980-\u09ff]", text))
-    if re.search(r"order|buy|অর্ডার|কিনতে", text, re.I):
-        return (
-            "অর্ডারের জন্য পণ্যের মডেল ও কয়টি লাগবে লিখুন। দোকানের কর্মী স্টক যাচাই করে জানাবেন।"
-            if bangla else
-            "For an order, tell us the model and quantity. Our shop team will check stock and follow up here."
-        )
-    for name, price, en_warranty, bn_warranty, pattern in products:
-        if re.search(pattern, text, re.I):
-            if bangla:
-                return f"{name}: ১০% ছাড়ে ৳{price:,}। ডেলিভারিসহ ৳{price + 60:,}। ওয়ারেন্টি {bn_warranty}। স্টক দোকান নিশ্চিত করবে।"
-            return f"{name}: ৳{price:,} after 10% off. ৳{price + 60:,} including delivery. Warranty: {en_warranty}. The shop will confirm stock."
     if re.search(r"delivery|shipping|ডেলিভারি", text, re.I):
         return "সারা বাংলাদেশে ডেলিভারি চার্জ প্রতি অর্ডারে ৬০ টাকা।" if bangla else "Delivery across Bangladesh costs ৳60 per order."
     if re.search(r"payment|cash|cod|bkash|nagad|card|পেমেন্ট|বিকাশ|নগদ|ক্যাশ", text, re.I):
@@ -221,9 +268,6 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 with sqlite3.connect(self.server.order_db) as db:
                     db.execute("BEGIN IMMEDIATE")
                     response = order_reply(db, sender, text, self.server.stock, self.server.demo)
-                if self.server.demo:
-                    prefix = "নমুনা দাম ও স্টক।\n" if re.search(r"[\u0980-\u09ff]", text) else "DEMO — Sample prices and stock.\n"
-                    response = prefix + response
                 self.send_messenger_reply(page_id, sender, response)
 
     def send_messenger_reply(self, page_id, sender, text):
@@ -260,8 +304,7 @@ def main():
         server.demo = os.environ.get("RORA_DEMO_MODE", os.environ.get("ROZA_DEMO_MODE")) == "1"
         server.order_db = "roza-demo.sqlite3" if server.demo else os.environ.get("RORA_ORDER_DB", os.environ.get("ROZA_ORDER_DB", "roza-orders.sqlite3"))
         with sqlite3.connect(server.order_db) as db:
-            db.execute("CREATE TABLE IF NOT EXISTS drafts(sender TEXT PRIMARY KEY, model TEXT NOT NULL, quantity INTEGER)")
-            db.execute("CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY, sender TEXT NOT NULL, model TEXT NOT NULL, quantity INTEGER NOT NULL)")
+            init_orders(db)
         if server.graph_version and not re.fullmatch(r"v[0-9]+\.[0-9]+", server.graph_version):
             raise SystemExit("META_GRAPH_VERSION must look like v00.0.")
         server.serve_forever()
